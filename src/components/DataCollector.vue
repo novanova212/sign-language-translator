@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted } from "vue";
 import { initHandLandmarker, detectHands, landmarksToFeatureVector } from "../ml/handDetection";
 import { addSample, getCounts, getTotalCount, exportToCSV, clearSamples } from "../ml/dataCollector";
 
-// Huruf SIBI statis saja (J dan Z butuh gerakan, skip dulu)
+// Huruf BISINDO statis saja (J dan Z butuh gerakan, di-skip dulu di tahap ini)
 const LETTERS = "ABCDEFGHIKLMNOPQRSTUVWXY".split("");
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -22,7 +22,9 @@ onMounted(async () => {
   stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
   if (videoRef.value) {
     videoRef.value.srcObject = stream;
-    await new Promise<void>((resolve) => { videoRef.value!.onloadedmetadata = () => resolve(); });
+    await new Promise<void>((resolve) => {
+      videoRef.value!.onloadedmetadata = () => resolve();
+    });
     videoRef.value.play();
   }
   status.value = "Siap merekam";
@@ -39,13 +41,17 @@ function loop() {
     canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    if (result.landmarks && result.landmarks.length > 0) {
+    if (result.landmarks.length > 0) {
       lastFeatures.value = landmarksToFeatureVector(result);
+
+      // gambar titik untuk SEMUA tangan yang kedeteksi (bisa 1 atau 2)
       ctx.fillStyle = "#00e5ff";
-      result.landmarks[0].forEach((p) => {
-        ctx.beginPath();
-        ctx.arc(p.x * canvas.width, p.y * canvas.height, 4, 0, 2 * Math.PI);
-        ctx.fill();
+      result.landmarks.forEach((hand) => {
+        hand.forEach((p) => {
+          ctx.beginPath();
+          ctx.arc(p.x * canvas.width, p.y * canvas.height, 4, 0, 2 * Math.PI);
+          ctx.fill();
+        });
       });
     } else {
       lastFeatures.value = null;
@@ -116,6 +122,12 @@ onUnmounted(() => {
       <button @click="handleExport">⬇️ Export CSV</button>
       <button @click="handleReset">🗑️ Reset</button>
     </div>
+
+    <p class="hint">
+      Setelah export, taruh file <code>my_dataset.csv</code> di folder
+      <code>training/</code>, lalu jalankan
+      <code>python train_model.py --data my_dataset.csv</code>
+    </p>
   </div>
 </template>
 
@@ -129,4 +141,5 @@ onUnmounted(() => {
 .capture-btn { font-size: 1.25rem; padding: 0.75rem 1.5rem; border-radius: 8px; border: none; background: #00e5ff; color: #0f172a; cursor: pointer; margin: 1rem 0; }
 .actions { display: flex; gap: 0.5rem; justify-content: center; margin-top: 1rem; }
 .actions button { padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; }
+.hint { margin-top: 1.5rem; font-size: 0.8rem; color: #94a3b8; }
 </style>
