@@ -1,84 +1,86 @@
 // handDetection.ts
-// Setup MediaPipe Hands untuk mendeteksi landmark DUA tangan sekaligus,
+// Pakai @mediapipe/tasks-vision (HandLandmarker) — sesuai package yang
+// sudah ter-install di project ini. Tetap melacak DUA tangan sekaligus,
 // karena banyak huruf BISINDO butuh dua tangan (beda dari ASL).
 
-import { Hands, type Results } from "@mediapipe/hands";
-import { Camera } from "@mediapipe/camera_utils";
+import {
+  HandLandmarker,
+  FilesetResolver,
+  type NormalizedLandmark,
+} from "@mediapipe/tasks-vision";
 
-export interface HandFeatureResult {
-  rightHandProb: number;
-  leftHandProb: number;
-  rightCoords: number[]; // 63 angka (21 titik x,y,z), 0 semua kalau tak terdeteksi
-  leftCoords: number[]; // 63 angka
+let handLandmarker: HandLandmarker | null = null;
+
+/** Panggil sekali di awal (misal saat komponen mount), sebelum detectHands(). */
+export async function initHandLandmarker() {
+  if (handLandmarker) return handLandmarker;
+
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU",
+    },
+    runningMode: "VIDEO",
+    numHands: 2, // WAJIB 2, karena BISINDO banyak pakai dua tangan
+  });
+
+  return handLandmarker;
+}
+
+export interface DetectResult {
+  landmarks: NormalizedLandmark[][]; // per tangan, tiap tangan = 21 titik {x,y,z}
+  handedness: { label: "Left" | "Right"; score: number }[]; // per tangan
+}
+
+/** Panggil tiap frame video. Butuh initHandLandmarker() sudah selesai duluan. */
+export function detectHands(
+  video: HTMLVideoElement,
+  timestampMs: number
+): DetectResult {
+  if (!handLandmarker) {
+    return { landmarks: [], handedness: [] };
+  }
+
+  const result = handLandmarker.detectForVideo(video, timestampMs);
+  const handedness = result.handednesses.map((h) => ({
+    label: h[0].categoryName as "Left" | "Right",
+    score: h[0].score,
+  }));
+
+  return { landmarks: result.landmarks, handedness };
 }
 
 const EMPTY_COORDS = () => new Array(63).fill(0);
 
 /**
- * Ubah hasil mentah MediaPipe jadi 128 fitur numerik,
- * urutannya HARUS sama persis dengan collect_landmarks.py di training/.
+ * Ubah hasil deteksi jadi 128 fitur numerik flat, urutannya HARUS sama
+ * persis dengan header CSV yang dipakai training/train_model.py:
+ * [right_hand_prob, left_hand_prob, ...right_coords(63), ...left_coords(63)]
  */
-function toFeatureResult(results: Results): HandFeatureResult {
-  let rightHandProb = 0;
-  let leftHandProb = 0;
+export function landmarksToFeatureVector(result: DetectResult): number[] {
+  let rightProb = 0;
+  let leftProb = 0;
   let rightCoords = EMPTY_COORDS();
   let leftCoords = EMPTY_COORDS();
 
-  const landmarksList = results.multiHandLandmarks;
-  const handednessList = results.multiHandedness;
+  result.landmarks.forEach((hand, i) => {
+    const handedness = result.handedness[i];
+    if (!handedness) return;
+    const coords = hand.flatMap((p) => [p.x, p.y, p.z]);
 
-  if (landmarksList && handednessList) {
-    landmarksList.forEach((landmarks, i) => {
-      const handedness = handednessList[i];
-      const coords = landmarks.flatMap((p) => [p.x, p.y, p.z]);
-
-      if (handedness.label === "Right") {
-        rightHandProb = handedness.score;
-        rightCoords = coords;
-      } else if (handedness.label === "Left") {
-        leftHandProb = handedness.score;
-        leftCoords = coords;
-      }
-    });
-  }
-
-  return { rightHandProb, leftHandProb, rightCoords, leftCoords };
-}
-
-export function createHandDetector(
-  onResults: (result: HandFeatureResult | null) => void
-) {
-  const hands = new Hands({
-    locateFile: (file) =>
-      `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
-  });
-
-  hands.setOptions({
-    maxNumHands: 2, // WAJIB 2, karena BISINDO banyak pakai dua tangan
-    modelComplexity: 1,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence: 0.6,
-  });
-
-  hands.onResults((results) => {
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-      onResults(toFeatureResult(results));
-    } else {
-      onResults(null);
+    if (handedness.label === "Right") {
+      rightProb = handedness.score;
+      rightCoords = coords;
+    } else if (handedness.label === "Left") {
+      leftProb = handedness.score;
+      leftCoords = coords;
     }
   });
 
-  return hands;
-}
-
-export function startCameraLoop(videoElement: HTMLVideoElement, hands: Hands) {
-  const camera = new Camera(videoElement, {
-    onFrame: async () => {
-      await hands.send({ image: videoElement });
-    },
-    width: 640,
-    height: 480,
-  });
-  camera.start();
-  return camera;
+  return [rightProb, leftProb, ...rightCoords, ...leftCoords];
 }
