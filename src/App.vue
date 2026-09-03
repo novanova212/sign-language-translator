@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
-import { initHandLandmarker, detectHands } from "./ml/handDetection";
+import { initHandLandmarker, detectHands, landmarksToFeatureVector } from "./ml/handDetection";
+import { loadModel, predictSign, type PredictionResult } from "./ml/classifier";
 import DataCollector from "./components/DataCollector.vue";
 
 const mode = ref<"translate" | "collect">("collect"); // default buka mode collect dulu
@@ -9,6 +10,8 @@ const videoRef = ref<HTMLVideoElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const status = ref("Memuat model deteksi tangan...");
 const detected = ref(false);
+const prediction = ref<PredictionResult | null>(null);
+const modelReady = ref(false);
 
 let animationId: number;
 let stream: MediaStream;
@@ -21,6 +24,12 @@ onMounted(async () => {
 async function startTranslateMode() {
   try {
     await initHandLandmarker();
+
+    // load model klasifikasi di background, gak nge-block kamera nyala duluan
+    loadModel()
+      .then(() => (modelReady.value = true))
+      .catch((err) => console.error("Gagal load model klasifikasi:", err));
+
     status.value = "Meminta akses kamera...";
 
     stream = await navigator.mediaDevices.getUserMedia({
@@ -54,13 +63,19 @@ function renderLoop() {
     canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    if (result.landmarks && result.landmarks.length > 0) {
+    if (result.landmarks.length > 0) {
       detected.value = true;
       drawLandmarks(ctx, result.landmarks, canvas.width, canvas.height);
-      // const features = landmarksToFeatureVector(result);
-      // const prediction = predict(features);
+
+      if (modelReady.value) {
+        const features = landmarksToFeatureVector(result);
+        predictSign(features).then((res) => {
+          prediction.value = res;
+        });
+      }
     } else {
       detected.value = false;
+      prediction.value = null;
     }
   }
   animationId = requestAnimationFrame(renderLoop);
@@ -68,13 +83,13 @@ function renderLoop() {
 
 function drawLandmarks(
   ctx: CanvasRenderingContext2D,
-  handsLandmarks: any[],
+  handsLandmarks: { x: number; y: number }[][],
   width: number,
   height: number
 ) {
   ctx.fillStyle = "#00e5ff";
   handsLandmarks.forEach((hand) => {
-    hand.forEach((point: any) => {
+    hand.forEach((point) => {
       ctx.beginPath();
       ctx.arc(point.x * width, point.y * height, 4, 0, 2 * Math.PI);
       ctx.fill();
@@ -130,7 +145,12 @@ onUnmounted(() => {
 
     <div class="translation-box">
       <p class="label">Hasil terjemahan:</p>
-      <p class="output">(model klasifikasi belum terpasang)</p>
+      <p class="output" v-if="prediction">
+        {{ prediction.label }}
+        <span class="confidence">({{ (prediction.confidence * 100).toFixed(0) }}%)</span>
+      </p>
+      <p class="output" v-else-if="!modelReady">(model belum siap / belum ada di public/models/sign_model)</p>
+      <p class="output" v-else>—</p>
     </div>
   </div>
 </template>
@@ -222,5 +242,11 @@ h1 {
   font-size: 1.75rem;
   font-weight: 600;
   margin: 0;
+}
+
+.translation-box .confidence {
+  font-size: 1rem;
+  color: #94a3b8;
+  font-weight: 400;
 }
 </style>
