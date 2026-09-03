@@ -1,51 +1,84 @@
-import {
-  HandLandmarker,
-  FilesetResolver,
-  type HandLandmarkerResult,
-} from "@mediapipe/tasks-vision";
+// handDetection.ts
+// Setup MediaPipe Hands untuk mendeteksi landmark DUA tangan sekaligus,
+// karena banyak huruf BISINDO butuh dua tangan (beda dari ASL).
 
-let handLandmarker: HandLandmarker | null = null;
+import { Hands, type Results } from "@mediapipe/hands";
+import { Camera } from "@mediapipe/camera_utils";
 
-export async function initHandLandmarker(): Promise<HandLandmarker> {
-  const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-  );
+export interface HandFeatureResult {
+  rightHandProb: number;
+  leftHandProb: number;
+  rightCoords: number[]; // 63 angka (21 titik x,y,z), 0 semua kalau tak terdeteksi
+  leftCoords: number[]; // 63 angka
+}
 
-  handLandmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-      delegate: "GPU",
+const EMPTY_COORDS = () => new Array(63).fill(0);
+
+/**
+ * Ubah hasil mentah MediaPipe jadi 128 fitur numerik,
+ * urutannya HARUS sama persis dengan collect_landmarks.py di training/.
+ */
+function toFeatureResult(results: Results): HandFeatureResult {
+  let rightHandProb = 0;
+  let leftHandProb = 0;
+  let rightCoords = EMPTY_COORDS();
+  let leftCoords = EMPTY_COORDS();
+
+  const landmarksList = results.multiHandLandmarks;
+  const handednessList = results.multiHandedness;
+
+  if (landmarksList && handednessList) {
+    landmarksList.forEach((landmarks, i) => {
+      const handedness = handednessList[i];
+      const coords = landmarks.flatMap((p) => [p.x, p.y, p.z]);
+
+      if (handedness.label === "Right") {
+        rightHandProb = handedness.score;
+        rightCoords = coords;
+      } else if (handedness.label === "Left") {
+        leftHandProb = handedness.score;
+        leftCoords = coords;
+      }
+    });
+  }
+
+  return { rightHandProb, leftHandProb, rightCoords, leftCoords };
+}
+
+export function createHandDetector(
+  onResults: (result: HandFeatureResult | null) => void
+) {
+  const hands = new Hands({
+    locateFile: (file) =>
+      `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+  });
+
+  hands.setOptions({
+    maxNumHands: 2, // WAJIB 2, karena BISINDO banyak pakai dua tangan
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6,
+  });
+
+  hands.onResults((results) => {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      onResults(toFeatureResult(results));
+    } else {
+      onResults(null);
+    }
+  });
+
+  return hands;
+}
+
+export function startCameraLoop(videoElement: HTMLVideoElement, hands: Hands) {
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await hands.send({ image: videoElement });
     },
-    runningMode: "VIDEO",
-    numHands: 2,
+    width: 640,
+    height: 480,
   });
-
-  return handLandmarker;
-}
-
-export function detectHands(
-  videoElement: HTMLVideoElement,
-  timestamp: number
-): HandLandmarkerResult {
-  if (!handLandmarker) {
-    throw new Error("Hand landmarker belum di-init. Panggil initHandLandmarker() dulu.");
-  }
-  return handLandmarker.detectForVideo(videoElement, timestamp);
-}
-
-export function landmarksToFeatureVector(
-  result: HandLandmarkerResult
-): number[] | null {
-  if (!result || !result.landmarks || result.landmarks.length === 0) {
-    return null;
-  }
-
-  const features: number[] = [];
-  const hand = result.landmarks[0];
-  hand.forEach((point) => {
-    features.push(point.x, point.y, point.z);
-  });
-
-  return features;
+  camera.start();
+  return camera;
 }
